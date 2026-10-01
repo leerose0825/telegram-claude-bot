@@ -26,6 +26,8 @@ python bot.py
 
 还不知道自己的 Telegram ID？先不设 `ALLOWED_USER_ID` 启动，在手机上给机器人发 `/myid`，把 ID 填进去后重启。
 
+默认使用 `claude-opus-5-5` 模型。想换模型可以设置 `CLAUDE_MODEL`，例如 `claude-sonnet-5-5`（更便宜）。
+
 ## 手机上可用的命令
 
 | 命令 | 作用 |
