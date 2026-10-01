@@ -14,7 +14,9 @@ ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 # 手机发来的文件保存到这里
 DOWNLOAD_DIR = os.path.expanduser(os.environ.get("DOWNLOAD_DIR", "~/Downloads/telegram"))
 
-client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+
+client = anthropic.AsyncAnthropic(api_key=CLAUDE_API_KEY)
 conversation_history = {}
 
 HELP_TEXT = (
@@ -119,39 +121,61 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await f.download_to_drive(dest)
     await msg.reply_text(f"✅ 已保存到电脑：{dest}")
 
+async def send_long(update: Update, text: str):
+    # Telegram 单条消息最多 4096 字，超长回复分段发送
+    for i in range(0, len(text), 4000):
+        await update.message.reply_text(text[i:i + 4000])
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_text = update.message.text
-    if user_id not in conversation_history:
-        conversation_history[user_id] = []
-    conversation_history[user_id].append({"role": "user", "content": user_text})
-    if len(conversation_history[user_id]) > 20:
-        conversation_history[user_id] = conversation_history[user_id][-20:]
+    history = conversation_history.setdefault(user_id, [])
+    messages = (history + [{"role": "user", "content": user_text}])[-20:]
+    if messages[0]["role"] != "user":
+        messages = messages[1:]
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
+        message = await client.beta.messages.create(
+            model=MODEL,
+            max_tokens=16000,
+            output_config={"effort": "low"},
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
             system="你是一个有帮助的AI助手。用用户使用的语言回复。",
-            messages=conversation_history[user_id]
+            messages=messages,
         )
-        reply = message.content[0].text
-        conversation_history[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(reply)
-    except Exception as e:
-        await update.message.reply_text(f"❌ 出错了：{str(e)}")
+        if message.stop_reason == "refusal":
+            return await update.message.reply_text("⚠️ 这个问题我没办法回答，换个问法试试。")
+        reply = "".join(b.text for b in message.content if b.type == "text").strip()
+        if not reply:
+            return await update.message.reply_text("⚠️ 没有收到回复，请再试一次。")
+        # 只在成功时写入记录，失败不会留下没有回复的提问
+        conversation_history[user_id] = messages + [{"role": "assistant", "content": reply}]
+        await send_long(update, reply)
+    except anthropic.AuthenticationError:
+        await update.message.reply_text("❌ Claude API Key 无效，请检查 CLAUDE_API_KEY。")
+    except anthropic.RateLimitError:
+        await update.message.reply_text("⏳ 请求太频繁，请稍后再试。")
+    except anthropic.APIConnectionError:
+        await update.message.reply_text("❌ 电脑连不上 Claude，请检查网络。")
+    except anthropic.APIStatusError as e:
+        await update.message.reply_text(f"❌ Claude 出错了（{e.status_code}）：{e.message}")
 
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler(["start", "help"], start))
-app.add_handler(CommandHandler("myid", myid))
-app.add_handler(CommandHandler("clear", clear))
-app.add_handler(CommandHandler("run", run_command))
-app.add_handler(CommandHandler("screenshot", screenshot))
-app.add_handler(CommandHandler("getfile", getfile))
-app.add_handler(CommandHandler("status", status))
-app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, receive_file))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-print("Bot 已启动...")
-if ALLOWED_USER_ID == 0:
-    print("⚠️ 未设置 ALLOWED_USER_ID，远程控制功能已关闭")
-app.run_polling()
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler(["start", "help"], start))
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("run", run_command))
+    app.add_handler(CommandHandler("screenshot", screenshot))
+    app.add_handler(CommandHandler("getfile", getfile))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, receive_file))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Bot 已启动...")
+    if ALLOWED_USER_ID == 0:
+        print("⚠️ 未设置 ALLOWED_USER_ID，远程控制功能已关闭")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
